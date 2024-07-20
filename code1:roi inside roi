@@ -1,0 +1,232 @@
+// 1. Select the folder containing the images
+dir = getDirectory("Choose a directory");
+
+// 2. Get list of .oib files in the folder
+fileList = getFileList(dir);
+oibFiles = newArray();
+oibFileName = newArray();
+j = 0;
+for (i = 0; i < fileList.length; i++) {
+    if (endsWith(fileList[i], ".oib")) {
+        oibFileName[j++] = fileList[i];
+        oibFiles = Array.concat(oibFiles, dir + fileList[i]);
+    }
+}
+
+if (oibFiles.length == 0) {
+    print("No .oib files found in the directory. Exiting.");
+    exit();
+}
+
+// Initialize arrays to store results
+allFileNames=newArray();
+allSlices = newArray();
+allIntensities = newArray();
+
+// Process each .oib file
+for (f = 0; f < oibFiles.length ; f++) {
+    filePath = oibFiles[f];
+    fileName = oibFileName[f];
+    print("Processing: " + fileName);
+    open(filePath);
+
+    // Adjust the name as needed to match the actual title of the transmission channel
+    selectWindow(fileName + " - C=2");
+
+    // Ensure roundness is included in the measurements
+    run("Set Measurements...", "area mean standard min centroid fit shape feret's integrated redirect=None decimal=3");
+
+    // Get the calibration information
+    getPixelSize(unit, pixelWidth, pixelHeight);
+
+    // Initialize variables to track the largest object with required roundness
+    largestArea = 0;
+    bestSlice = -1;
+    bestCentroidX = 0;
+    bestCentroidY = 0;
+
+    // Loop through each stack to find the largest object with roundness > 0.5
+    for (i = 1; i <= nSlices(); i++) {
+        setSlice(i);
+        run("Duplicate...", "title=tempSlice" + i);
+        selectWindow("tempSlice" + i);
+        run("8-bit");
+        setAutoThreshold("Default");
+
+        // Refine the threshold to avoid background being selected as an object
+        setOption("BlackBackground", true);
+        run("Convert to Mask");
+        run("Find Edges");
+
+        // Analyze particles with a more stringent size filter
+        run("Analyze Particles...", "size=100-5000 display clear summarize add");
+
+        roiCount = roiManager("Count");
+
+        if (roiCount > 0) {
+            // Measure all ROIs and ensure correct measurements are recorded
+            roiManager("Measure");
+
+            // Get the number of ROIs and ensure correct measurements are used
+            for (j = 0; j < roiCount; j++) {
+                roiManager("Select", j);
+                run("Measure");
+                roundness = getResult("Round", j + roiCount + 1);
+                area = getResult("Area", j + roiCount + 1);
+
+                if (roundness > 0.5 && area > largestArea) {
+                    largestArea = area;
+
+                    bestSlice = i;
+                    bestCentroidX = getResult("X", j + roiCount + 1);
+                    bestCentroidY = getResult("Y", j + roiCount + 1);
+                }
+            }
+        }
+        close();
+        roiManager("Reset");
+    }
+
+    // Check if a valid slice with the largest object was found
+    if (bestSlice == -1 || largestArea < 5000) {
+        // Open the first slice for user to draw an ROI
+        setSlice(1);
+        print("Draw an oval ROI on the first slice and click OK.");
+        waitForUser("Draw an oval ROI on the first slice and click OK.");
+
+        // Measure the user-drawn ROI
+        run("Measure");
+        largestArea = getResult("Area", nResults() - 1);
+        bestCentroidX = getResult("X", nResults() - 1);
+        bestCentroidY = getResult("Y", nResults() - 1);
+        bestSlice = 1;
+    }
+
+    // Convert centroid coordinates from pixels to calibrated units
+    calibratedCentroidX = bestCentroidX / pixelWidth;
+    calibratedCentroidY = bestCentroidY / pixelHeight;
+
+    // Calculate the new radius (20% of the area)
+    newRadius = sqrt((0.95 * largestArea) / PI);
+
+    // Print centroid and radius values for debugging
+    print("File: " + filePath);
+    print("Best Slice: " + bestSlice);
+    print("Centroid X (calibrated): " + calibratedCentroidX);
+    print("Centroid Y (calibrated): " + calibratedCentroidY);
+    print("New Radius: " + newRadius);
+
+    // Create the initial ROI based on the largest object found
+    selectWindow(fileName + " - C=2");
+    setSlice(bestSlice);
+
+    // Ensure coordinates and radius are properly converted to integers for the ROI
+    intCentroidX = round(calibratedCentroidX);
+    intCentroidY = round(calibratedCentroidY);
+    intNewRadius = round(newRadius);
+
+    makeOval(intCentroidX - intNewRadius, intCentroidY - intNewRadius, intNewRadius * 2, intNewRadius * 2);
+    roiManager("Add");
+
+    selectWindow(fileName + " - C=0");
+
+    // Find the edges within the initial ROI and update the ROI to the area with the brightest intensity among the first five slices
+    brightestIntensity = -1;
+    bestSliceForBrightestIntensity = 1;
+    bestRoiIndex = 0;
+
+    for (i = 2; i <= 5 && i <= nSlices(); i++) {
+        setSlice(i);
+        run("Duplicate...", "title=duplicateSlice" + i);
+        run("Duplicate...", "title=duplicateSlice1" + i);
+        selectWindow("duplicateSlice" + i);
+
+        run("8-bit");
+        setAutoThreshold("RenyiEntropy dark");
+        setOption("BlackBackground", true);
+
+        makeOval(intCentroidX - intNewRadius, intCentroidY - intNewRadius, intNewRadius * 2, intNewRadius * 2);
+        run("Find Edges");
+        run("Analyze Particles...", "size=100-5000 display clear summarize add");
+
+        roiCount = roiManager("Count");
+        if (roiCount > 0) {
+            for (j = 0; j < roiCount; j++) {
+                selectWindow("duplicateSlice1" + i);
+                roiManager("Select", j);
+                run("Measure");
+                meanIntensity = getResult("Mean", j);
+                if (meanIntensity > brightestIntensity) {
+                    brightestIntensity = meanIntensity;
+                    bestSliceForBrightestIntensity = i;
+                    bestRoiIndex = j;
+                }
+            }
+        }
+        roiManager("Reset");
+        close();
+    }
+
+  // Set the ROI to the area with the brightest intensity
+    selectWindow(fileName + " - C=0");
+    setSlice(bestSliceForBrightestIntensity);
+    run("Duplicate...", "title=duplicateBrightest");
+    selectWindow("duplicateBrightest");
+    run("8-bit");
+    setAutoThreshold("RenyiEntropy dark");
+    setOption("BlackBackground", true);
+
+    makeOval(intCentroidX - intNewRadius, intCentroidY - intNewRadius, intNewRadius * 2, intNewRadius * 2);
+    run("Find Edges");
+    run("Analyze Particles...", "size=100-5000 display clear summarize add");
+    roiManager("Select", bestRoiIndex);
+    roiManager("Add");
+    
+    
+   selectWindow(fileName + " - C=0");
+    // Measure the intensity for each stack in the first channel
+    for (i = 1; i <= nSlices(); i++) {
+        setSlice(i);
+        roiManager("Select", roiManager("Count") - 1); // Select the last added ROI
+        run("Measure");
+        intensity = getResult("Mean", nResults() - 1);
+        allFileNames = Array.concat(allFileNames, fileName);
+        allSlices = Array.concat(allSlices, i);
+        allIntensities = Array.concat(allIntensities, intensity);
+    }
+    // Clear ROI Manager
+    roiManager("Reset");
+    close("*");
+}
+
+// Save results to CSV
+outputPath = dir + "intensity_resultsfinal.csv";
+file = File.open(outputPath); // Open file for writing (create if not exists)
+
+// Write header
+header = "Slice";
+for (f = 0; f < oibFiles.length ; f++) {
+    header += "," + oibFileName[f];
+}
+header += "\n";
+print(file, header);
+
+// Write intensity data
+numSlices = allSlices.length /oibFiles.length ; // Number of slices per file
+
+
+for (i = 0; i < numSlices; i++) {
+	line="";
+    line += "," + (allSlices[i]) ; // Slice number starts from 1
+    
+    for (f = 0; f < oibFiles.length; f++) {
+        index = f * numSlices + i;
+        line +="," + allIntensities[index] ;
+    }
+    line = substring(line,1, lengthOf(line)); // Remove trailing comma
+    line += "\n";
+    print(file,line); // Append line
+}
+
+File.close(file); // Close the file
+print("Intensity results saved to: " + outputPath);
