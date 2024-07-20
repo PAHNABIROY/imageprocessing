@@ -1,0 +1,7 @@
+---
+path: C:/Users/roypa/OneDrive/Desktop/files_spheroid
+train: images/train
+val: images/val
+nc: 1
+names:
+  - spheroid
